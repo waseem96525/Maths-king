@@ -1,0 +1,37 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# next.js
+.next/
+out/
+build/
+next-env.d.ts
+
+# compiled engine self-test (npm run build:engine)
+.selftest/
+
+# compiled maintenance scripts (npm run build:scripts)
+.scripts/
+
+# production
+dist/
+
+# local data (sqlite database + uploaded images)
+data/
+
+# environment
+.env
+.env.local
+.env.*.local
+
+# misc
+.DS_Store
+Thumbs.db
+*.pem
+.vercel
+*.tsbuildinfo
+coverage/
+npm-debug.log*
+yarn-error.log*

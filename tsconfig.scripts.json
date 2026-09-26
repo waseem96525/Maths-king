@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".scripts",
+    "rootDir": ".",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "declaration": false,
+    "incremental": false,
+    "noEmitOnError": true,
+    "types": ["node"]
+  },
+  "include": ["scripts/reset-db.ts", "scripts/seed-db.ts", "src/lib/**/*.ts"],
+  "exclude": ["node_modules", ".next", ".selftest", ".scripts"]
+}

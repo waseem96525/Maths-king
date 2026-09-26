@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".selftest",
+    "rootDir": ".",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "jsx": "react-jsx",
+    "declaration": false,
+    "incremental": false,
+    "noEmitOnError": false,
+    "types": ["node"]
+  },
+  "include": ["scripts/selftest.ts", "scripts/dbg.ts", "src/lib/**/*.ts"],
+  "exclude": ["node_modules", ".next"]
+}

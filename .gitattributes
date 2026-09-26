@@ -1,0 +1,16 @@
+# Normalise line endings so the same file does not show as modified on every
+# checkout just because Windows and Linux disagree about CRLF.
+* text=auto eol=lf
+
+# Files that must keep their exact bytes.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# Lockfiles and generated files stay untouched.
+package-lock.json -diff
+tsconfig.tsbuildinfo -diff linguist-generated
