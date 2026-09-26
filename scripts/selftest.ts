@@ -21,6 +21,7 @@ import { isNum, NUM, type Node } from '../src/lib/math/ast';
 // equation-solving section above.
 import { solve as solveRequest } from '../src/lib/solver';
 import { appliedMigrations, migrate, openDatabase } from '../src/lib/db';
+import { createStore, getStore, setStore } from '../src/lib/store';
 import {
   clearProblems,
   countProblems,
@@ -777,6 +778,50 @@ function freshDb() {
   eq('answer survives corrupt steps', row.answerLatex, 'x = 5');
   eq('steps degrade to empty', row.steps.length, 0);
   db.close();
+}
+
+/* ------------------------------------------------------------------ */
+section('Storage fallback');
+
+// A deployment with no writable disk must still solve maths. The fallback
+// reports that plainly instead of throwing, and — critically — does not buffer
+// in memory, which would look like it worked while losing data on every cold
+// start.
+{
+  const store = createStore();
+  ok('a writable filesystem yields a working store', store.available, store.reason ?? '');
+  ok('a working store has no reason string', store.reason === null);
+}
+
+{
+  process.env.VERCEL = '1';
+  try {
+    const store = createStore();
+    ok('vercel disables the store', !store.available);
+    ok('the reason is human readable', typeof store.reason === 'string' && store.reason!.length > 20, String(store.reason));
+    // Every operation must be inert rather than throwing, because the routes and
+    // the dashboard call all of them unconditionally.
+    ok('record is a no-op', store.record(solveRequest({ input: '2x + 5 = 15' })) === null);
+    ok('list is empty', store.list().length === 0);
+    ok('count is zero', store.count() === 0);
+    ok('get is null', store.get(1) === null);
+    ok('delete reports nothing removed', store.delete(1) === false);
+    ok('clear removes nothing', store.clear() === 0);
+    ok('summary is zeroed', store.summary().total === 0 && store.summary().failures === 0);
+    // Filters must not throw either, since the route builds them before asking.
+    ok('list accepts filters', store.list({ search: 'x', mode: 'solve', onlyFailures: true, limit: 10 }).length === 0);
+  } finally {
+    delete process.env.VERCEL;
+  }
+}
+
+{
+  // The store is a process-wide singleton so the connection is opened once;
+  // setStore exists so a test can put it back.
+  const before = getStore();
+  ok('getStore is stable', getStore() === before);
+  setStore(null);
+  ok('setStore(null) rebuilds', getStore() !== null);
 }
 
 /* ------------------------------------------------------------------ */

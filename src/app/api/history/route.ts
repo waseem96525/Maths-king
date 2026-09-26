@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 
-import { clearProblems, countProblems, listProblems, recordProblem, summarise, type ListOptions } from '@/lib/history';
+import type { ListOptions } from '@/lib/history';
 import { solve, type SolveMode } from '@/lib/solver';
+import { getStore } from '@/lib/store';
 
 /**
  * Read and write the problem history.
@@ -41,10 +42,16 @@ export async function GET(request: Request) {
     offset: Number.isFinite(rawOffset) ? rawOffset : undefined,
   };
 
+  const store = getStore();
+  // Reading an unavailable store is not an error: it returns nothing, and the
+  // reason travels with the response so the dashboard can explain itself
+  // instead of rendering an empty page that looks like data loss.
   return NextResponse.json({
-    problems: listProblems(options),
-    total: countProblems(options),
-    summary: summarise(),
+    available: store.available,
+    reason: store.reason,
+    problems: store.list(options),
+    total: store.count(options),
+    summary: store.summary(),
   });
 }
 
@@ -86,17 +93,26 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'That input is too long to record.' }, { status: 400 });
   }
 
+  const store = getStore();
+  if (!store.available) {
+    return NextResponse.json({ available: false, recorded: false, reason: store.reason }, { status: 503 });
+  }
+
   const result = solve({
     input,
     mode: mode as SolveMode | undefined,
     variable: variable as string | undefined,
   });
-  const id = recordProblem(result);
+  const id = store.record(result);
 
-  return NextResponse.json({ id, mode: result.mode, ok: result.ok }, { status: 201 });
+  return NextResponse.json({ available: true, recorded: id !== null, id, mode: result.mode, ok: result.ok }, { status: 201 });
 }
 
 /** DELETE /api/history — clear the whole history. */
 export async function DELETE() {
-  return NextResponse.json({ deleted: clearProblems() });
+  const store = getStore();
+  if (!store.available) {
+    return NextResponse.json({ available: false, reason: store.reason }, { status: 503 });
+  }
+  return NextResponse.json({ available: true, deleted: store.clear() });
 }

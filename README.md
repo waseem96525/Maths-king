@@ -96,13 +96,32 @@ transaction. `npm run db:reset` refuses to run against a non-file
 `.env.example` documents the intended configuration. Copy it to `.env` only if
 you need to change something; the app runs with no environment at all.
 
+### Deploying to Vercel
+
+The solver is pure, so it deploys to Vercel unchanged. **Problem history does
+not**, because Vercel functions have a read-only filesystem apart from an
+ephemeral `/tmp`, and each invocation may be a fresh instance with no shared
+storage. SQLite cannot work there.
+
+Rather than crash, the app detects this and disables history: `/dashboard`
+explains that it is switched off, the history endpoints return `503` with a
+reason, and solving is unaffected. It deliberately does **not** fall back to
+in-memory storage, which would appear to work while losing data on every cold
+start and disagreeing across concurrent instances.
+
+All SQL lives behind the `HistoryStore` interface in `src/lib/store.ts`, so
+adding a hosted database means writing one more implementation there. The
+intended target is Postgres (Supabase); nothing above the seam changes.
+
 ## Status
 
-Working: the engine, the solver UI, problem history, the dashboard, the API.
+Working: the engine, the solver UI, problem history on a machine with a disk,
+the dashboard, the API.
 
-Not built yet: accounts (Auth.js was the intended choice), the AI tutor layer,
-image upload and OCR, and payments. The offline engine is the only solving path
-today, which is why nothing here needs an API key.
+Not built yet: hosted persistence (see above), accounts (Auth.js was the
+intended choice), the AI tutor layer, image upload and OCR, and payments. The
+offline engine is the only solving path today, which is why nothing here needs
+an API key.
 
 Known engine limits: `expand` over-expands denominator powers, fraction
 arithmetic does not combine quotients, and cubic solving relies on rational roots
@@ -110,4 +129,5 @@ rather than the general formula.
 
 ## Requirements
 
-Node 22.5+ (uses `node:sqlite`; developed on 25.x).
+Node 24+ (`node:sqlite` is stable from 24; `package.json` pins this so Vercel
+does not fall back to an older runtime).
