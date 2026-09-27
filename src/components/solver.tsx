@@ -2,8 +2,9 @@
 
 import { AlertCircle, Check, CornerDownLeft, Lightbulb, Sparkles } from 'lucide-react';
 import Link from 'next/link';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
+import { CameraScan, CapturedPhoto, type CapturedShot } from '@/components/camera-scan';
 import { Math } from '@/components/math';
 import { EXAMPLES, solve, type SolveMode, type SolveResult } from '@/lib/solver';
 import { cn } from '@/lib/utils';
@@ -23,6 +24,9 @@ export function Solver() {
   const [result, setResult] = useState<SolveResult | null>(null);
   /** Id of the stored row, once the server confirms it. */
   const [recorded, setRecorded] = useState<number | null>(null);
+  /** The scanned photo, held only in this tab. Never uploaded. */
+  const [shot, setShot] = useState<CapturedShot | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   /**
    * The solver is a pure function over an exact engine, so it runs right here
@@ -104,6 +108,7 @@ export function Solver() {
             </label>
             <input
               id="solver-input"
+              ref={inputRef}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               placeholder="2x + 5 = 15"
@@ -114,11 +119,14 @@ export function Solver() {
               enterKeyHint="go"
               aria-describedby="solver-hint"
               className={cn(
-                'w-full rounded-xl border border-input bg-background px-4 py-3.5 pr-12',
+                // Room for the camera button and the submit button, which both
+                // float inside the field's right edge.
+                'w-full rounded-xl border border-input bg-background px-4 py-3.5 pr-[6.25rem]',
                 'font-mono text-base text-foreground placeholder:text-muted-foreground/60',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:border-transparent',
               )}
             />
+            <CameraScan onCapture={setShot} shot={shot} closeFocusRef={inputRef} />
             <button
               type="submit"
               disabled={!canSubmit}
@@ -132,6 +140,8 @@ export function Solver() {
               <CornerDownLeft className="size-4" aria-hidden />
             </button>
           </div>
+
+          {shot !== null ? <CapturedPhoto shot={shot} onClear={() => setShot(null)} /> : null}
 
           <div id="solver-hint" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
             <span>{activeMode.hint}.</span>

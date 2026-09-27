@@ -26,6 +26,20 @@ Type in plain notation — `2x + 5 = 15`, `d/dx x^2 sin(x)`, `integrate 3x^2`,
 buttons. With no prefix the shape of the input decides: an equation is solved, a
 bare formula is differentiated.
 
+### Scanning a problem
+
+The camera button in the input row opens a live preview. Line the problem up in
+the frame, take the photo, check it, and it is pinned next to the input so you
+can type against it.
+
+There is no OCR, and that is a decision rather than a gap. The only OCR accurate
+on mathematical notation is either a paid cloud API or a local model large
+enough to be its own product; both contradict the guarantee above. So the camera
+does the thing a phone camera is genuinely good at — a crisp, correctly-oriented
+image of the page in front of you — and you do the part that needs
+understanding. The photo is re-encoded to a bounded JPEG in the tab and never
+uploaded, so the promise holds exactly as it does for typed input.
+
 ## Design notes
 
 **Exactness is a feature, not a slogan.** Answers are `Rational` values over
@@ -115,11 +129,11 @@ intended target is Postgres (Supabase); nothing above the seam changes.
 
 ## Status
 
-Working: the engine, the solver UI, problem history on a machine with a disk,
-the dashboard, the API.
+Working: the engine, the solver UI, camera capture (no OCR, by design — see
+above), problem history on a machine with a disk, the dashboard, the API.
 
 Not built yet: hosted persistence (see above), accounts (Auth.js was the
-intended choice), the AI tutor layer, image upload and OCR, and payments. The
+intended choice), the AI tutor layer, OCR of scanned problems, and payments. The
 offline engine is the only solving path today, which is why nothing here needs
 an API key.
 
