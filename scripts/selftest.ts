@@ -23,6 +23,20 @@ import { solve as solveRequest } from '../src/lib/solver';
 import { appliedMigrations, migrate, openDatabase } from '../src/lib/db';
 import { createStore, getStore, setStore } from '../src/lib/store';
 import {
+  CROP_HANDLES,
+  FULL_FRAME,
+  MAX_EDGE,
+  MAX_UPLOAD_BYTES,
+  MIN_CROP,
+  clampCrop,
+  cropToPixels,
+  isFullFrame,
+  moveCrop,
+  pointToNormalized,
+  rectFromPoints,
+  resizeCrop,
+} from '../src/lib/image';
+import {
   clearProblems,
   countProblems,
   deleteProblem,
@@ -822,6 +836,153 @@ section('Storage fallback');
   ok('getStore is stable', getStore() === before);
   setStore(null);
   ok('setStore(null) rebuilds', getStore() !== null);
+}
+
+/* ------------------------------------------------------------------ */
+section('Camera crop geometry');
+
+// The crop rectangle is the arithmetic between a finger on a screen and a
+// rectangle of pixels. Getting it wrong does not throw — it silently returns a
+// mangled photo — so it is checked here rather than discovered on a phone.
+{
+  const full = clampCrop(FULL_FRAME);
+  ok('the full frame is the identity', isFullFrame(full), dump(full));
+  ok('a full-frame crop is recognised', isFullFrame({ x: 0, y: 0, w: 1, h: 1 }));
+  ok('a trimmed frame is not full', !isFullFrame({ x: 0.1, y: 0, w: 0.9, h: 1 }));
+  ok('a shrunk frame is not full', !isFullFrame({ x: 0, y: 0, w: 0.5, h: 0.5 }));
+
+  // Degenerate rectangles must never survive: they encode a 0x0 image.
+  const collapsed = clampCrop({ x: 0, y: 0, w: 0, h: 0 });
+  eq('a collapsed crop is floored to the minimum width', collapsed.w, MIN_CROP);
+  eq('a collapsed crop is floored to the minimum height', collapsed.h, MIN_CROP);
+  ok('a collapsed crop stays inside the frame', collapsed.x + collapsed.w <= 1 + 1e-9, dump(collapsed));
+
+  // Oversized and out-of-bounds input from a drag past the edge of the screen.
+  const oversize = clampCrop({ x: 0, y: 0, w: 4, h: 4 });
+  eq('a crop wider than the frame is capped', oversize.w, 1);
+  eq('a crop taller than the frame is capped', oversize.h, 1);
+  const negative = clampCrop({ x: -3, y: -2, w: 0.5, h: 0.5 });
+  eq('a negative origin is pulled to zero (x)', negative.x, 0);
+  eq('a negative origin is pulled to zero (y)', negative.y, 0);
+  const overflow = clampCrop({ x: 0.9, y: 0.9, w: 0.5, h: 0.5 });
+  ok('a crop cannot hang off the right edge', overflow.x + overflow.w <= 1 + 1e-9, dump(overflow));
+  ok('a crop cannot hang off the bottom edge', overflow.y + overflow.h <= 1 + 1e-9, dump(overflow));
+
+  // A non-finite value would reach drawImage and yield a silently empty image.
+  const nan = clampCrop({ x: NaN, y: NaN, w: NaN, h: NaN });
+  ok('NaN is rejected rather than propagated', Number.isFinite(nan.x + nan.y + nan.w + nan.h), dump(nan));
+  const infinite = clampCrop({ x: Infinity, y: -Infinity, w: Infinity, h: Infinity });
+  ok('Infinity is rejected rather than propagated', Number.isFinite(infinite.x + infinite.y + infinite.w + infinite.h), dump(infinite));
+
+  // A drag works in all four directions, because the user picks a corner and
+  // drags inwards or outwards without thinking about it.
+  const se = rectFromPoints(0.25, 0.25, 0.75, 0.75);
+  eq('down-right drag (x)', se.x, 0.25);
+  eq('down-right drag (w)', se.w, 0.5);
+  const nw = rectFromPoints(0.75, 0.75, 0.25, 0.25);
+  ok('up-left drag gives the same rectangle', nw.x === se.x && nw.y === se.y && nw.w === se.w && nw.h === se.h, dump(nw));
+  const mixed = rectFromPoints(0.75, 0.25, 0.25, 0.75);
+  ok('a mixed-direction drag is normalised', mixed.x === 0.25 && mixed.w === 0.5, dump(mixed));
+  ok('a click with no drag still yields a usable crop', clampCrop(rectFromPoints(0.5, 0.5, 0.5, 0.5)).w >= MIN_CROP);
+
+  // Moving preserves size and stops at the edges.
+  const moved = moveCrop({ x: 0.5, y: 0.5, w: 0.3, h: 0.3 }, 0.2, 0.2);
+  eq('moving right preserves width', moved.w, 0.3);
+  eq('moving down preserves height', moved.h, 0.3);
+  const pushed = moveCrop({ x: 0.5, y: 0.5, w: 0.3, h: 0.3 }, 5, 5);
+  ok('moving off the edge is clamped, not lost', Math.abs(pushed.x + pushed.w - 1) < 1e-9, dump(pushed));
+  // A selection dragged against the edge must stop, not shrink: shrinking it
+  // would silently discard the crop the user had already made.
+  eq('moving off the edge does not shrink the selection', pushed.w, 0.3);
+  eq('moving off the edge does not shrink the selection (height)', pushed.h, 0.3);
+  const pulled = moveCrop({ x: 0.2, y: 0.2, w: 0.3, h: 0.3 }, -5, -5);
+  ok('moving before the origin is clamped to zero', pulled.x === 0 && pulled.y === 0, dump(pulled));
+  eq('moving to the origin does not shrink the selection', pulled.w, 0.3);
+
+  // A drawn rectangle that runs off the edge is shortened from the far side,
+  // not recentred. Capping the size first loses where the drag began, so a
+  // drag from the middle out past the right edge would select everything.
+  const ranOver = rectFromPoints(0.5, 0.5, 5, 5);
+  ok('a rectangle running off the edge keeps its near corner', Math.abs(ranOver.x - 0.5) < 1e-9, dump(ranOver));
+  ok('a rectangle running off the edge is cut at the border', Math.abs(ranOver.x + ranOver.w - 1) < 1e-9, dump(ranOver));
+  ok('a rectangle running off the edge selects only the far half', ranOver.w < 0.6, dump(ranOver));
+  const leftOver = rectFromPoints(0.5, 0.5, -5, -5);
+  ok('a rectangle running off the left keeps its far corner', Math.abs(leftOver.x + leftOver.w - 0.5) < 1e-9, dump(leftOver));
+  ok('a rectangle running off the left is anchored at the border', leftOver.x === 0, dump(leftOver));
+  // The whole frame is only reachable by starting at the border, not by
+  // overshooting the middle of it.
+  ok('overshooting the middle never selects the whole frame', !isFullFrame(ranOver), dump(ranOver));
+  ok('drawing across the whole frame does select it', isFullFrame(rectFromPoints(0, 0, 1, 1)));
+  // An origin at the very edge still leaves a usable rectangle.
+  const atEdge = clampCrop({ x: 1, y: 1, w: 0.5, h: 0.5 });
+  ok('a rectangle dragged to the exact corner is still usable', atEdge.w >= MIN_CROP && atEdge.h >= MIN_CROP, dump(atEdge));
+  ok('a rectangle dragged to the exact corner stays in the frame', atEdge.x + atEdge.w <= 1 + 1e-9 && atEdge.y + atEdge.h <= 1 + 1e-9, dump(atEdge));
+
+  // Resizing anchors the opposite corner, which is what makes a crop feel right.
+  const base = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 };
+  const grown = resizeCrop(base, 'se', 0.25, 0.25);
+  eq('dragging the south-east corner keeps the origin', grown.x, 0.25);
+  eq('dragging the south-east corner grows the width', grown.w, 0.75);
+  eq('dragging the south-east corner grows the height', grown.h, 0.75);
+  const shrunk = resizeCrop(base, 'se', -0.1, -0.1);
+  eq('dragging the south-east corner inward shrinks it', shrunk.w, 0.4);
+  const fromNw = resizeCrop(base, 'nw', 0.1, 0.1);
+  ok('dragging the north-west corner moves the origin', Math.abs(fromNw.x - 0.35) < 1e-9, dump(fromNw));
+  ok('dragging the north-west corner holds the far corner still', Math.abs(fromNw.x + fromNw.w - 0.75) < 1e-9, dump(fromNw));
+  const past = resizeCrop(base, 'se', 5, 5);
+  ok('resizing past the edge stays inside the frame', past.x + past.w <= 1 + 1e-9 && past.y + past.h <= 1 + 1e-9, dump(past));
+  const collapsedByDrag = resizeCrop(base, 'se', -5, -5);
+  ok('resizing to nothing stops at the minimum', collapsedByDrag.w >= MIN_CROP && collapsedByDrag.h >= MIN_CROP, dump(collapsedByDrag));
+  ok('all four handles are addressable', CROP_HANDLES.length === 4);
+
+  // Every corner combination must agree with the frame it is anchored to.
+  for (const handle of CROP_HANDLES) {
+    const r = resizeCrop(base, handle, 0.05, 0.05);
+    ok(`handle ${handle} stays inside the frame`, r.x >= 0 && r.y >= 0 && r.x + r.w <= 1 + 1e-9 && r.y + r.h <= 1 + 1e-9, dump(r));
+    ok(`handle ${handle} never degenerates`, r.w >= MIN_CROP && r.h >= MIN_CROP, dump(r));
+  }
+
+  // Pointer maths. The box is a plain object so no DOM is needed.
+  const box = { left: 100, top: 50, width: 400, height: 200 };
+  const p = pointToNormalized(300, 150, box);
+  eq('the centre of the box is the centre of the image', p.x, 0.5);
+  eq('the centre of the box is the centre of the image (y)', p.y, 0.5);
+  const topLeft = pointToNormalized(100, 50, box);
+  ok('the top-left corner maps to the origin', topLeft.x === 0 && topLeft.y === 0, dump(topLeft));
+  const past2 = pointToNormalized(900, 900, box);
+  ok('a drag past the edge is not clamped here', past2.x > 1 && past2.y > 1, dump(past2));
+  const degenerateBox = pointToNormalized(10, 10, { left: 0, top: 0, width: 0, height: 0 });
+  ok('a zero-sized box does not divide by zero', degenerateBox.x === 0 && degenerateBox.y === 0, dump(degenerateBox));
+
+  // Pixel conversion, including the rounding trap at the far edge.
+  const half = cropToPixels({ x: 0, y: 0, w: 0.5, h: 0.5 }, 1000, 800);
+  eq('crop x in pixels', half.x, 0);
+  eq('crop width in pixels', half.w, 500);
+  eq('crop height in pixels', half.h, 400);
+  const inner = cropToPixels({ x: 0.25, y: 0.5, w: 0.5, h: 0.5 }, 1000, 800);
+  ok('an interior crop is offset', inner.x === 250 && inner.y === 400, dump(inner));
+  const edge = cropToPixels({ x: 0, y: 0, w: 1, h: 1 }, 1000, 800);
+  ok('a full frame is exactly the image', edge.x === 0 && edge.y === 0 && edge.w === 1000 && edge.h === 800, dump(edge));
+  // Odd sizes make the rounded far edge overshoot by a pixel.
+  for (const [w, h] of [[999, 333], [7, 13], [1, 1], [1400, 788], [3, 1000]]) {
+    for (const c of [FULL_FRAME, { x: 0.1, y: 0.1, w: 0.9, h: 0.9 }, { x: 0.33, y: 0.66, w: 0.33, h: 0.33 }]) {
+      const p2 = cropToPixels(c, w, h);
+      ok(
+        `pixels stay in bounds for ${w}x${h} ${c.w}`,
+        p2.x >= 0 && p2.y >= 0 && p2.w >= 1 && p2.h >= 1 && p2.x + p2.w <= w && p2.y + p2.h <= h,
+        dump(p2),
+      );
+    }
+  }
+  const tiny = cropToPixels({ x: 0, y: 0, w: MIN_CROP, h: MIN_CROP }, 10, 10);
+  ok('the minimum crop still yields at least one pixel', tiny.w >= 1 && tiny.h >= 1, dump(tiny));
+  ok('a one-pixel image does not produce a zero rect', cropToPixels(FULL_FRAME, 1, 1).w === 1);
+
+  // Cropping to a small region of a large frame must reduce the output, which
+  // is the entire point of cropping a 12MP phone photo.
+  ok('the output is bounded', MAX_EDGE > 0 && MAX_EDGE <= 4096);
+  ok('uploads are bounded', MAX_UPLOAD_BYTES > 0);
+  ok('the minimum crop is a sensible fraction', MIN_CROP > 0 && MIN_CROP < 0.25);
 }
 
 /* ------------------------------------------------------------------ */

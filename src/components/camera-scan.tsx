@@ -1,9 +1,19 @@
 'use client';
 
 import * as Dialog from '@radix-ui/react-dialog';
-import { Camera, Check, ImagePlus, LoaderCircle, RotateCcw, Trash2, X, Zap, ZapOff } from 'lucide-react';
+import { Camera, Check, Crop, ImagePlus, LoaderCircle, RotateCcw, Trash2, X, Zap, ZapOff } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
+import { Cropper } from '@/components/cropper';
+import {
+  FULL_FRAME,
+  cropShot,
+  encodeShot,
+  isFullFrame,
+  shotFromFile,
+  type CapturedShot,
+  type CropRect,
+} from '@/lib/image';
 import { cn } from '@/lib/utils';
 
 /**
@@ -18,20 +28,6 @@ import { cn } from '@/lib/utils';
  * photo stays in this tab as a data URL; it is never uploaded, and it is
  * dropped the moment you clear it.
  */
-
-/** A still captured in this tab. */
-export type CapturedShot = {
-  /** A local `data:` URL. Never sent anywhere. */
-  url: string;
-  width: number;
-  height: number;
-};
-
-/** Longest edge kept when re-encoding, in pixels. */
-const MAX_EDGE = 1400;
-const JPEG_QUALITY = 0.82;
-/** Refuse absurd uploads before decoding them into memory. */
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 const CAMERA_CONSTRAINTS: MediaStreamConstraints = {
   audio: false,
@@ -104,83 +100,6 @@ function isConstraintFailure(error: unknown): boolean {
 }
 
 /**
- * Re-encode a frame as a right-sized JPEG data URL.
- *
- * Phone cameras produce 12MP frames, and a base64 data URL costs a third more
- * than the bytes it encodes. Downscaling here keeps the preview light enough to
- * hold in React state without a round trip to any server.
- */
-function encodeShot(source: CanvasImageSource, width: number, height: number): CapturedShot {
-  const scale = Math.min(1, MAX_EDGE / Math.max(width, height));
-  const w = Math.max(1, Math.round(width * scale));
-  const h = Math.max(1, Math.round(height * scale));
-
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-
-  const ctx = canvas.getContext('2d');
-  if (ctx === null) {
-    throw new Error('This browser could not provide a 2D canvas to encode the photo.');
-  }
-  // Video frames have no alpha channel, but a JPEG that encodes transparent
-  // pixels comes out black in some viewers, so the canvas is filled first.
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(source, 0, 0, w, h);
-
-  return { url: canvas.toDataURL('image/jpeg', JPEG_QUALITY), width: w, height: h };
-}
-
-type Decoded = {
-  source: CanvasImageSource;
-  width: number;
-  height: number;
-  release: () => void;
-};
-
-/**
- * Decode a picked file with its EXIF rotation already applied.
- *
- * Phone cameras record orientation in metadata rather than rotating pixels, so
- * a portrait photo is stored sideways. `imageOrientation: 'from-image'` is the
- * one option that fixes that; `createImageBitmap` is not available everywhere,
- * and an `<img>` applies the same EXIF transform when it is decoded, so there
- * is a second path for older engines.
- */
-async function decodeFile(file: File): Promise<Decoded> {
-  if (typeof createImageBitmap === 'function') {
-    try {
-      const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
-      return {
-        source: bitmap,
-        width: bitmap.width,
-        height: bitmap.height,
-        release: () => bitmap.close(),
-      };
-    } catch {
-      // Fall through to the <img> decoder rather than failing the upload.
-    }
-  }
-
-  const url = URL.createObjectURL(file);
-  try {
-    const image = new Image();
-    image.src = url;
-    await image.decode();
-    return {
-      source: image,
-      width: image.naturalWidth,
-      height: image.naturalHeight,
-      release: () => URL.revokeObjectURL(url),
-    };
-  } catch (error) {
-    URL.revokeObjectURL(url);
-    throw error;
-  }
-}
-
-/**
  * The button that opens the scanner, and the scanner itself.
  *
  * `onCapture` receives the still, or `null` when the user clears it. The caller
@@ -224,7 +143,7 @@ export function CameraScan({
       </Dialog.Trigger>
 
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-foreground/50 backdrop-blur-sm animate-fade-in" />
+        <Dialog.Overlay className="animate-fade-in fixed inset-0 z-40 bg-foreground/50 backdrop-blur-sm" />
         <Dialog.Content
           className={cn(
             'fixed inset-x-0 bottom-0 z-50 mx-auto w-full max-w-lg animate-fade-up',
@@ -275,7 +194,7 @@ export function CameraScan({
 }
 
 /**
- * The live preview plus its controls.
+ * The live preview, then the crop step, then the controls.
  *
  * Mounted only while the dialog is open, so the `getUserMedia` effect below
  * starts on open and its teardown releases the camera on close. That ordering
@@ -297,7 +216,11 @@ function ScannerBody({ onDone }: { onDone: (shot: CapturedShot) => void }) {
   const [canRetry, setCanRetry] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [torchAvailable, setTorchAvailable] = useState(false);
+  /** The full frame, awaiting a crop decision. */
   const [pending, setPending] = useState<CapturedShot | null>(null);
+  const [crop, setCrop] = useState<CropRect>(FULL_FRAME);
+  /** True while the crop is being applied, so the button cannot be re-pressed. */
+  const [committing, setCommitting] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   /** Bumped to restart a stream that already failed. */
   const [attempt, setAttempt] = useState(0);
@@ -390,16 +313,27 @@ function ScannerBody({ onDone }: { onDone: (shot: CapturedShot) => void }) {
     };
   }, [video, attempt]);
 
+  /** Any new still starts from the whole frame; the crop is never inherited. */
+  function acceptFullFrame(next: CapturedShot) {
+    setPending(next);
+    setCrop(FULL_FRAME);
+    setUploadError(null);
+  }
+
   const capture = useCallback(() => {
     if (video === null || video.videoWidth === 0) {
       return;
     }
-    setUploadError(null);
     try {
       // `videoWidth`/`videoHeight` are the frame's true size, which is usually
       // larger than the element's layout size. Using the layout size would
       // capture only what fits on screen.
-      setPending(encodeShot(video, video.videoWidth, video.videoHeight));
+      const frame = encodeShot(video, video.videoWidth, video.videoHeight);
+      // The same rule as `acceptFullFrame`, spelled out rather than called so
+      // that this callback depends on nothing but `video`.
+      setPending(frame);
+      setCrop(FULL_FRAME);
+      setUploadError(null);
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : 'The frame could not be captured.');
     }
@@ -422,73 +356,79 @@ function ScannerBody({ onDone }: { onDone: (shot: CapturedShot) => void }) {
 
   async function pickFile(file: File) {
     setUploadError(null);
-    if (!file.type.startsWith('image/')) {
-      setUploadError('That file is not an image. Pick a photo of the problem.');
-      return;
-    }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setUploadError('That photo is too large. One under 25 MB will do.');
-      return;
-    }
     try {
-      const decoded = await decodeFile(file);
-      try {
-        setPending(encodeShot(decoded.source, decoded.width, decoded.height));
-      } finally {
-        decoded.release();
-      }
-    } catch {
-      setUploadError('That photo could not be read. A JPEG or PNG from the camera app will work.');
+      acceptFullFrame(await shotFromFile(file));
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'That photo could not be read.');
     }
+  }
+
+  /** Apply the crop and hand the result back to the caller. */
+  async function commit() {
+    if (pending === null || committing) {
+      return;
+    }
+    setCommitting(true);
+    setUploadError(null);
+    try {
+      onDone(await cropShot(pending, crop));
+    } catch (error) {
+      setUploadError(
+        error instanceof Error ? error.message : 'The photo could not be cropped. Try the full frame.',
+      );
+      setCommitting(false);
+    }
+  }
+
+  function retake() {
+    setPending(null);
+    setCrop(FULL_FRAME);
+    setUploadError(null);
   }
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="relative aspect-[4/3] w-full overflow-hidden rounded-xl bg-foreground/90">
-        {/*
-          The video stays mounted for the whole life of the dialog, including
-          behind the review step, so the stream is never torn down and re-opened
-          on a retake. The still is drawn over it rather than replacing it.
-        */}
-        <video
-          ref={setVideo}
-          autoPlay
-          playsInline
-          muted
-          className="size-full object-cover"
-          aria-label="Live camera preview"
-        />
-
-        {pending !== null ? (
-          <img
-            src={pending.url}
-            alt="The problem you scanned"
-            className="absolute inset-0 size-full bg-foreground object-contain"
+      {pending !== null ? (
+        <Cropper shot={pending} crop={crop} onChange={setCrop} />
+      ) : (
+        <div className="relative aspect-[4/3] w-full overflow-hidden rounded-xl bg-foreground/90">
+          {/*
+            The video stays mounted for the whole life of the dialog, including
+            behind the crop step, so the stream is never torn down and re-opened
+            on a retake.
+          */}
+          <video
+            ref={setVideo}
+            autoPlay
+            playsInline
+            muted
+            className="size-full object-cover"
+            aria-label="Live camera preview"
           />
-        ) : null}
 
-        {status === 'starting' && pending === null ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center text-sm text-background/80">
-            <LoaderCircle className="size-6 animate-spin" aria-hidden />
-            <p>Starting the camera…</p>
-          </div>
-        ) : null}
+          {status === 'starting' ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center text-sm text-background/80">
+              <LoaderCircle className="size-6 animate-spin" aria-hidden />
+              <p>Starting the camera…</p>
+            </div>
+          ) : null}
 
-        {status === 'blocked' && pending === null ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 p-6 text-center">
-            <Camera className="size-6 text-background/70" aria-hidden />
-            <p className="text-sm font-medium text-background">{problem?.title}</p>
-            <p className="max-w-xs text-xs leading-relaxed text-background/70">{problem?.detail}</p>
-          </div>
-        ) : null}
-      </div>
+          {status === 'blocked' ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 p-6 text-center">
+              <Camera className="size-6 text-background/70" aria-hidden />
+              <p className="text-sm font-medium text-background">{problem?.title}</p>
+              <p className="max-w-xs text-xs leading-relaxed text-background/70">{problem?.detail}</p>
+            </div>
+          ) : null}
+        </div>
+      )}
 
       {/*
         `aria-live` rather than a role: these are status messages that replace
         each other, and announcing them the moment they appear is the point.
       */}
       <p aria-live="polite" className="min-h-[1.25rem] text-xs text-muted-foreground">
-        {uploadError ?? problem?.detail ?? ''}
+        {uploadError ?? (pending === null ? (problem?.detail ?? '') : '')}
       </p>
 
       <input
@@ -515,7 +455,7 @@ function ScannerBody({ onDone }: { onDone: (shot: CapturedShot) => void }) {
               onClick={capture}
               disabled={status !== 'live'}
               className={cn(
-                'inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3',
+                'inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-primary px-4 py-3',
                 'text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
                 'disabled:pointer-events-none disabled:opacity-40',
@@ -546,28 +486,53 @@ function ScannerBody({ onDone }: { onDone: (shot: CapturedShot) => void }) {
           <>
             <button
               type="button"
-              onClick={() => onDone(pending)}
+              onClick={() => void commit()}
+              disabled={committing}
               className={cn(
-                'inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3',
+                // `flex-1` shrinks this below its text width once the row has
+                // three buttons in it, so the label is pinned to one line and
+                // the siblings wrap instead.
+                'inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-primary px-4 py-3',
                 'text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+                'disabled:pointer-events-none disabled:opacity-40',
               )}
             >
-              <Check className="size-4" aria-hidden />
-              Use this photo
+              {committing ? (
+                <LoaderCircle className="size-4 animate-spin" aria-hidden />
+              ) : (
+                <Check className="size-4" aria-hidden />
+              )}
+              {isFullFrame(crop) ? 'Use the whole photo' : 'Use this crop'}
             </button>
             <button
               type="button"
-              onClick={() => setPending(null)}
+              onClick={retake}
+              disabled={committing}
               className={cn(
                 'touch-target inline-flex items-center justify-center gap-1.5 rounded-xl border border-border px-3',
                 'text-sm font-medium transition-colors hover:bg-secondary',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                'disabled:pointer-events-none disabled:opacity-40',
               )}
             >
               <RotateCcw className="size-4" aria-hidden />
               Retake
             </button>
+            {!isFullFrame(crop) ? (
+              <button
+                type="button"
+                onClick={() => setCrop(FULL_FRAME)}
+                className={cn(
+                  'touch-target inline-flex items-center justify-center gap-1.5 rounded-xl border border-border px-3',
+                  'text-sm font-medium transition-colors hover:bg-secondary',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                )}
+              >
+                <Crop className="size-4" aria-hidden />
+                Full frame
+              </button>
+            ) : null}
           </>
         )}
 
@@ -619,11 +584,7 @@ export function CapturedPhoto({
 }) {
   return (
     <div className="surface flex items-start gap-3 p-3 shadow-sm">
-      <img
-        src={shot.url}
-        alt="The problem you scanned"
-        className="h-20 w-20 shrink-0 rounded-lg border border-border object-cover"
-      />
+      <PhotoViewer shot={shot} />
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-foreground">Photo captured</p>
         <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
@@ -645,5 +606,60 @@ export function CapturedPhoto({
         <Trash2 className="size-4" aria-hidden />
       </button>
     </div>
+  );
+}
+
+/**
+ * The thumbnail, which opens the photo at a size worth reading.
+ *
+ * A 80px thumbnail is enough to recognise a page but not to check a character,
+ * and the whole point of the photo is to check characters. Radix restores focus
+ * to this button on close, which is already where the eye is.
+ */
+function PhotoViewer({ shot }: { shot: CapturedShot }) {
+  return (
+    <Dialog.Root>
+      <Dialog.Trigger asChild>
+        <button
+          type="button"
+          className={cn(
+            'shrink-0 overflow-hidden rounded-lg border border-border',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card',
+          )}
+          aria-label="Enlarge the photo to read it"
+          title="Enlarge"
+        >
+          <img src={shot.url} alt="" className="size-20 object-cover" />
+        </button>
+      </Dialog.Trigger>
+
+      <Dialog.Portal>
+        <Dialog.Overlay className="animate-fade-in fixed inset-0 z-40 bg-foreground/70 backdrop-blur-sm" />
+        <Dialog.Content className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 p-4">
+          <Dialog.Title className="sr-only">The problem you scanned</Dialog.Title>
+          <Dialog.Description className="sr-only">
+            An enlarged view of the photo taken with your camera. Close it to go back to the solver.
+          </Dialog.Description>
+          <Dialog.Close asChild>
+            <button
+              type="button"
+              className={cn(
+                'absolute right-4 top-4 flex items-center justify-center rounded-full bg-card/90 p-2.5 shadow-md',
+                'text-foreground transition-colors hover:bg-card',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              )}
+              aria-label="Close the enlarged photo"
+            >
+              <X className="size-5" aria-hidden />
+            </button>
+          </Dialog.Close>
+          <img
+            src={shot.url}
+            alt="The problem you scanned, enlarged"
+            className="max-h-[85dvh] max-w-full rounded-xl bg-card object-contain shadow-lg"
+          />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

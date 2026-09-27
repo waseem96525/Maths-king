@@ -4,8 +4,9 @@ import { AlertCircle, Check, CornerDownLeft, Lightbulb, Sparkles } from 'lucide-
 import Link from 'next/link';
 import { useCallback, useRef, useState } from 'react';
 
-import { CameraScan, CapturedPhoto, type CapturedShot } from '@/components/camera-scan';
+import { CameraScan, CapturedPhoto } from '@/components/camera-scan';
 import { Math } from '@/components/math';
+import type { CapturedShot } from '@/lib/image';
 import { EXAMPLES, solve, type SolveMode, type SolveResult } from '@/lib/solver';
 import { cn } from '@/lib/utils';
 

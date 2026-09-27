@@ -29,8 +29,11 @@ bare formula is differentiated.
 ### Scanning a problem
 
 The camera button in the input row opens a live preview. Line the problem up in
-the frame, take the photo, check it, and it is pinned next to the input so you
-can type against it.
+the frame and take the photo, and you can crop it down to just the part you
+care about before keeping it — most of a photo of a worksheet is desk. Drag to
+select, drag again to move, drag a corner to resize, or focus a corner and use
+the arrow keys. The kept photo is pinned next to the input, and clicking it
+opens a full-size view for checking a character.
 
 There is no OCR, and that is a decision rather than a gap. The only OCR accurate
 on mathematical notation is either a paid cloud API or a local model large
@@ -39,6 +42,13 @@ does the thing a phone camera is genuinely good at — a crisp, correctly-orient
 image of the page in front of you — and you do the part that needs
 understanding. The photo is re-encoded to a bounded JPEG in the tab and never
 uploaded, so the promise holds exactly as it does for typed input.
+
+**The crop geometry is tested.** `src/lib/image.ts` holds the rectangle
+arithmetic as pure functions with no DOM reference, because it is the part that
+can be wrong quietly: being off by a pixel does not throw, it just returns a
+mangled photo. It is covered by `npm run selftest`, including the cases that
+actually bit during development — dragging off the edge of the image used to
+snap to the whole frame instead of selecting the half you dragged over.
 
 ## Design notes
 
@@ -74,6 +84,7 @@ src/lib/math/      the engine — pure, dependency-free, no I/O
   poly.ts            polynomial arithmetic
   solve.ts           equations, systems, inequalities, with steps
 src/lib/solver.ts  orchestration: input -> mode -> explained answer
+src/lib/image.ts   crop geometry (pure, tested) and canvas encoding
 src/lib/db.ts      node:sqlite connection and migrations
 src/lib/history.ts all SQL lives here
 src/app/           routes and API
@@ -89,7 +100,7 @@ browser for instant answers, and behind the API for anything else.
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Dev server on port 3000 |
-| `npm test` | Build the engine and run 317 assertions |
+| `npm test` | Build the engine and run 414 assertions |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | ESLint via `next lint` |
 | `npm run build` | Production build |
